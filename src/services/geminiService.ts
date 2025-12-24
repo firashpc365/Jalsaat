@@ -1,26 +1,64 @@
-
-import { GoogleGenAI, GenerateContentResponse } from "@google/genai";
-import type { ServiceItem, EventItem, User, Client, CostTrackerItem, ProcurementDocument, SubItem, ProposalLineItem } from '../types';
+/// <reference types="vite/client" />
+import { GoogleGenAI } from "@google/genai";
+import type { ServiceItem, EventItem, User, Client, CostTrackerItem, ProposalLineItem } from '../types';
 
 export class QuotaExceededError extends Error {
-  retryAfter: number;
-  isHardLimit: boolean;
-  userAction?: string;
+    retryAfter: number;
+    isHardLimit: boolean;
+    userAction?: string;
 
-  constructor(message: string, retryAfter = 60, detailedMessage = '', isHardLimit = false, userAction = '') {
-    super(message);
-    this.name = 'QuotaExceededError';
-    this.retryAfter = retryAfter;
-    this.isHardLimit = isHardLimit;
-    this.userAction = userAction;
-  }
+    constructor(message: string, retryAfter = 60, _detailedMessage = '', isHardLimit = false, userAction = '') {
+        super(message);
+        this.name = 'QuotaExceededError';
+        this.retryAfter = retryAfter;
+        this.isHardLimit = isHardLimit;
+        this.userAction = userAction;
+    }
 }
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+const getApiKey = () => {
+    return import.meta.env.VITE_API_KEY || '';
+};
 
-const safeGenerateContent = async (params: any): Promise<GenerateContentResponse> => {
+let aiInstance: any = null;
+
+const getAI = () => {
+    if (!aiInstance) {
+        const apiKey = getApiKey();
+        if (!apiKey) {
+            throw new Error("Gemini API Key is missing. Please set VITE_API_KEY in your environment.");
+        }
+        aiInstance = new GoogleGenAI(apiKey);
+    }
+    return aiInstance;
+};
+
+const safeGenerateContent = async (params: any): Promise<any> => {
     try {
-        return await ai.models.generateContent(params);
+        const ai = getAI();
+        const model = ai.getGenerativeModel({
+            model: params.model || "gemini-1.5-flash",
+            systemInstruction: params.config?.systemInstruction
+        });
+
+        const generationConfig = { ...params.config };
+        delete generationConfig.systemInstruction;
+
+        let contents = params.contents;
+        if (typeof contents === 'string') {
+            contents = [{ role: 'user', parts: [{ text: contents }] }];
+        }
+
+        const result = await model.generateContent({
+            contents,
+            generationConfig
+        });
+
+        const response = result.response;
+        return {
+            text: response.text(),
+            candidates: response.candidates,
+        };
     } catch (error: any) {
         if (error.status === 429 || error.code === 429) {
             throw new QuotaExceededError("API Quota Exceeded", 60, error.message);
@@ -43,33 +81,33 @@ const parseJSON = (text: string) => {
         // Attempt to salvage if it's a list wrapped in text
         const arrayMatch = text.match(/\[.*\]/s);
         if (arrayMatch) {
-            try { return JSON.parse(arrayMatch[0]); } catch (e2) {}
+            try { return JSON.parse(arrayMatch[0]); } catch (e2) { }
         }
         const objectMatch = text.match(/\{.*\}/s);
         if (objectMatch) {
-             try { return JSON.parse(objectMatch[0]); } catch (e3) {}
+            try { return JSON.parse(objectMatch[0]); } catch (e3) { }
         }
         return {};
     }
 }
 
 const fileToBase64 = (file: File): Promise<string> => {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-        const result = reader.result as string;
-        // Remove data URL prefix (e.g., "data:image/png;base64,")
-        const base64 = result.split(',')[1];
-        resolve(base64);
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+            const result = reader.result as string;
+            // Remove data URL prefix (e.g., "data:image/png;base64,")
+            const base64 = result.split(',')[1];
+            resolve(base64);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+    });
 };
 
 // --- CORE SERVICES ---
 
-export const getAIServiceAssistance = async (type: string, service: Partial<ServiceItem>, settings: any, uniqueCategories: string[]) => {
+export const getAIServiceAssistance = async (type: string, service: Partial<ServiceItem>, _settings: any, uniqueCategories: string[]) => {
     let prompt = '';
     let responseMimeType = 'text/plain';
 
@@ -92,15 +130,15 @@ export const getAIServiceAssistance = async (type: string, service: Partial<Serv
             prompt = `Generate 5 relevant tags for "${service.name}"${service.description ? ` based on description: "${service.description}"` : ''}. Return as comma-separated string.`;
             break;
         case 'category':
-             prompt = `Suggest the best category for "${service.name}" from this list: ${uniqueCategories.join(', ')}. If none fit, suggest a new short one. Return only the category name.`;
-             break;
+            prompt = `Suggest the best category for "${service.name}" from this list: ${uniqueCategories.join(', ')}. If none fit, suggest a new short one. Return only the category name.`;
+            break;
         case 'image_prompt':
-             prompt = `Create a detailed image generation prompt for a high-quality, photorealistic image of the service "${service.name}" (${service.description}). The image should be suitable for a luxury event catalogue.`;
-             break;
+            prompt = `Create a detailed image generation prompt for a high-quality, photorealistic image of the service "${service.name}" (${service.description}). The image should be suitable for a luxury event catalogue.`;
+            break;
     }
 
     const response = await safeGenerateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-1.5-flash",
         contents: prompt,
         config: responseMimeType !== 'text/plain' ? { responseMimeType } : undefined
     });
@@ -109,14 +147,14 @@ export const getAIServiceAssistance = async (type: string, service: Partial<Serv
     if (responseMimeType === 'application/json') {
         result = parseJSON(result);
     }
-    
+
     return { result, fullPrompt: prompt, source: 'ai' };
 };
 
 export const generateReportInsight = async (reportType: string, contextData: any) => {
     const prompt = `You are an executive analyst. Generate a brief, insightful ${reportType} based on the following data: ${JSON.stringify(contextData)}. Use HTML formatting (bold, lists) for readability. Highlight key trends and actionable advice.`;
     const response = await safeGenerateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-1.5-flash",
         contents: prompt,
     });
     return { result: response.text || '', fullPrompt: prompt };
@@ -125,9 +163,9 @@ export const generateReportInsight = async (reportType: string, contextData: any
 export const generateEventTheme = async (event: EventItem) => {
     const prompt = `Suggest a creative and cohesive theme for the event "${event.name}" (${event.eventType}) for client "${event.clientName}". 
     Return JSON with fields: title, description, imagePrompt (a prompt to generate a mood board image for this theme).`;
-    
+
     const response = await safeGenerateContent({
-        model: "gemini-2.5-pro",
+        model: "gemini-1.5-pro",
         contents: prompt,
         config: { responseMimeType: "application/json" }
     });
@@ -136,6 +174,7 @@ export const generateEventTheme = async (event: EventItem) => {
 };
 
 export const generateImageForPrompt = async (prompt: string): Promise<string> => {
+    const ai = getAI();
     const response = await ai.models.generateImages({
         model: 'imagen-4.0-generate-001',
         prompt: prompt,
@@ -145,6 +184,7 @@ export const generateImageForPrompt = async (prompt: string): Promise<string> =>
 };
 
 export const generateCustomImage = async (prompt: string, aspectRatio: string = '16:9'): Promise<string> => {
+    const ai = getAI();
     const response = await ai.models.generateImages({
         model: 'imagen-4.0-generate-001',
         prompt: prompt,
@@ -156,7 +196,7 @@ export const generateCustomImage = async (prompt: string, aspectRatio: string = 
 export const analyzeImageContent = async (prompt: string, file: File): Promise<string> => {
     const base64Data = await fileToBase64(file);
     const response = await safeGenerateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-1.5-flash",
         contents: {
             parts: [
                 { inlineData: { mimeType: file.type, data: base64Data } },
@@ -170,7 +210,7 @@ export const analyzeImageContent = async (prompt: string, file: File): Promise<s
 export const getFastSuggestions = async (event: EventItem) => {
     const prompt = `Give 3 quick, creative ideas for "${event.name}".`;
     const response = await safeGenerateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-1.5-flash",
         contents: prompt
     });
     return { result: response.text || '', fullPrompt: prompt };
@@ -179,7 +219,7 @@ export const getFastSuggestions = async (event: EventItem) => {
 export const generateEventIntroduction = async (event: EventItem, themeTitle: string, themeDescription: string) => {
     const prompt = `Write a professional proposal introduction for "${event.name}". Theme: "${themeTitle}" - ${themeDescription}. Client: ${event.clientName}.`;
     const response = await safeGenerateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-1.5-flash",
         contents: prompt
     });
     return response.text || '';
@@ -188,7 +228,7 @@ export const generateEventIntroduction = async (event: EventItem, themeTitle: st
 export const generateEventConclusion = async (event: EventItem) => {
     const prompt = `Write a persuasive conclusion for an event proposal for "${event.name}".`;
     const response = await safeGenerateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-1.5-flash",
         contents: prompt
     });
     return response.text || '';
@@ -205,7 +245,7 @@ export const enhanceLineItem = async (item: CostTrackerItem, event: EventItem, t
     }
 
     const response = await safeGenerateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-1.5-flash",
         contents: prompt
     });
     return { result: response.text || '', fullPrompt: prompt };
@@ -214,16 +254,16 @@ export const enhanceLineItem = async (item: CostTrackerItem, event: EventItem, t
 export const reviewProposalContent = async (fullText: string) => {
     const prompt = `Review this event proposal content and provide feedback on tone, clarity, and persuasiveness. Point out any missing key elements. Content: ${fullText}`;
     const response = await safeGenerateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-1.5-flash",
         contents: prompt
     });
     return { result: response.text || '', fullPrompt: prompt };
 };
 
-export const generateSubItemsForItem = async (item: ProposalLineItem, event: EventItem) => {
+export const generateSubItemsForItem = async (item: ProposalLineItem, _event: EventItem) => {
     const prompt = `List 3-5 sub-items or components included in "${item.name}" for an event. Return JSON array of objects with 'name' and 'description'.`;
     const response = await safeGenerateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-1.5-flash",
         contents: prompt,
         config: { responseMimeType: "application/json" }
     });
@@ -233,17 +273,17 @@ export const generateSubItemsForItem = async (item: ProposalLineItem, event: Eve
 export const generateSubItemsForService = async (service: ServiceItem) => {
     const prompt = `List typical sub-items/ingredients for service "${service.name}" (${service.category}). Return JSON array of objects with 'name' and 'description'.`;
     const response = await safeGenerateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-1.5-flash",
         contents: prompt,
         config: { responseMimeType: "application/json" }
     });
     return parseJSON(response.text || '[]');
 };
 
-export const generateSubItemDescription = async (name: string, parent: { name: string }, event: any) => {
+export const generateSubItemDescription = async (name: string, parent: { name: string }, _event: any) => {
     const prompt = `Describe the sub-item "${name}" which is part of "${parent.name}". Keep it brief (1 sentence).`;
     const response = await safeGenerateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-1.5-flash",
         contents: prompt
     });
     return response.text || '';
@@ -252,16 +292,16 @@ export const generateSubItemDescription = async (name: string, parent: { name: s
 export const generateTermsAndConditions = async (event: EventItem) => {
     const prompt = `Generate standard terms and conditions for event "${event.name}". Include payment terms, cancellation policy, and liability.`;
     const response = await safeGenerateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-1.5-flash",
         contents: prompt
     });
     return { result: response.text || '', fullPrompt: prompt };
 };
 
 export const analyzeEventRisks = async (events: EventItem[]) => {
-    const prompt = `Analyze risks for these events: ${JSON.stringify(events.map(e => ({name: e.name, status: e.status, date: e.date})))}. Return JSON object where keys are eventIds and values are objects with { riskLevel: 'Low'|'Medium'|'High', riskFactors: string[], suggestedStatus: string }.`;
+    const prompt = `Analyze risks for these events: ${JSON.stringify(events.map(e => ({ name: e.name, status: e.status, date: e.date })))}. Return JSON object where keys are eventIds and values are objects with { riskLevel: 'Low'|'Medium'|'High', riskFactors: string[], suggestedStatus: string }.`;
     const response = await safeGenerateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-1.5-flash",
         contents: prompt,
         config: { responseMimeType: "application/json" }
     });
@@ -271,11 +311,11 @@ export const analyzeEventRisks = async (events: EventItem[]) => {
 export const analyzeMarketRate = async (itemName: string, location: string) => {
     const prompt = `What is the market rate range for renting/buying "${itemName}" in ${location} (in SAR)? Provide a range and brief reasoning.`;
     const response = await safeGenerateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-1.5-flash",
         contents: prompt,
         config: { tools: [{ googleSearch: {} }] } // Using Search Grounding
     });
-    
+
     let text = response.text || '';
     return { priceRange: text, reasoning: "Based on Google Search results.", fullPrompt: prompt };
 };
@@ -283,7 +323,7 @@ export const analyzeMarketRate = async (itemName: string, location: string) => {
 export const createEventFromInput = async (input: { text: string, files: File[] }, services: ServiceItem[], useDeepThinking: boolean) => {
     const parts: any[] = [];
     if (input.text) parts.push({ text: input.text });
-    
+
     for (const file of input.files) {
         const base64 = await fileToBase64(file);
         parts.push({ inlineData: { mimeType: file.type, data: base64 } });
@@ -337,33 +377,33 @@ export const createEventFromInput = async (input: { text: string, files: File[] 
       ]
     }`;
 
-    parts.push({ text: `Extract event details. Master Services List for reference: ${JSON.stringify(services.map(s=>s.name))}` });
+    parts.push({ text: `Extract event details. Master Services List for reference: ${JSON.stringify(services.map(s => s.name))}` });
 
-    const config: any = { 
+    const config: any = {
         responseMimeType: "application/json",
         systemInstruction: systemInstruction
     };
-    
+
     if (useDeepThinking) {
         config.thinkingConfig = { thinkingBudget: 16384 }; // Max budget for forensic analysis
     }
 
     const response = await safeGenerateContent({
-        model: "gemini-2.5-pro", // Always use Pro for extraction
+        model: "gemini-1.5-pro", // Always use Pro for extraction
         contents: { parts },
         config
     });
 
     const eventData = parseJSON(response.text || '{}');
-    return { 
-        eventData, 
-        interaction: { 
+    return {
+        eventData,
+        interaction: {
             promptSummary: 'Extract event data from files/text',
-            fullPrompt: 'Forensic Event Extraction', 
-            response: response.text, 
-            feature: 'event_creation', 
-            model: 'gemini-2.5-pro' 
-        } 
+            fullPrompt: 'Forensic Event Extraction',
+            response: response.text,
+            feature: 'event_creation',
+            model: 'gemini-1.5-pro'
+        }
     };
 };
 
@@ -372,12 +412,12 @@ export const createEventFromInput = async (input: { text: string, files: File[] 
 export const createServicesFromInput = async (input: { text: string, files: File[] }) => {
     const parts: any[] = [];
     if (input.text) parts.push({ text: input.text });
-    
+
     for (const file of input.files) {
         const base64 = await fileToBase64(file);
         parts.push({ inlineData: { mimeType: file.type, data: base64 } });
     }
-    
+
     const systemInstruction = `You are an expert Procurement and Pricing Analyst. 
     Your task is to extract service catalogs from documents (menus, invoices, price lists) with 100% accuracy.
     
@@ -400,9 +440,9 @@ export const createServicesFromInput = async (input: { text: string, files: File
     parts.push({ text: "Extract all services found in the document." });
 
     const response = await safeGenerateContent({
-        model: "gemini-2.5-pro",
+        model: "gemini-1.5-pro",
         contents: { parts },
-        config: { 
+        config: {
             responseMimeType: "application/json",
             systemInstruction: systemInstruction,
             thinkingConfig: { thinkingBudget: 8192 } // High budget for deep analysis
@@ -413,20 +453,20 @@ export const createServicesFromInput = async (input: { text: string, files: File
     const services = Array.isArray(result) ? result : (result.services || []);
     const metadata = result.metadata || { detectedBranding: 'Unknown', pricingStrategy: 'Standard' };
 
-    return { 
-        services, 
-        metadata, 
-        interaction: { 
+    return {
+        services,
+        metadata,
+        interaction: {
             promptSummary: 'Extract services from files/text',
-            fullPrompt: 'Bulk Service Extraction', 
-            response: response.text, 
-            feature: 'bulk_service_creation', 
-            model: 'gemini-2.5-pro' 
-        } 
+            fullPrompt: 'Bulk Service Extraction',
+            response: response.text,
+            feature: 'bulk_service_creation',
+            model: 'gemini-1.5-pro'
+        }
     };
 };
 
-export const extractEventItemsFromInput = async (input: { text: string, files: File[] }, useDeepThinking: boolean) => {
+export const extractEventItemsFromInput = async (input: { text: string, files: File[] }, _useDeepThinking: boolean) => {
     const parts: any[] = [];
     if (input.text) parts.push({ text: input.text });
     for (const file of input.files) {
@@ -453,9 +493,9 @@ export const extractEventItemsFromInput = async (input: { text: string, files: F
 
     // Force high-power model for extraction
     const response = await safeGenerateContent({
-        model: "gemini-2.5-pro",
+        model: "gemini-1.5-pro",
         contents: { parts },
-        config: { 
+        config: {
             responseMimeType: "application/json",
             systemInstruction: systemInstruction,
             thinkingConfig: { thinkingBudget: 4096 }
@@ -463,7 +503,7 @@ export const extractEventItemsFromInput = async (input: { text: string, files: F
     });
 
     let items = parseJSON(response.text || '[]');
-    
+
     // Robustness check: Ensure items is an array
     if (!Array.isArray(items)) {
         // Attempt to extract array from common keys if AI wrapped the response
@@ -474,25 +514,25 @@ export const extractEventItemsFromInput = async (input: { text: string, files: F
                 break;
             }
         }
-        
+
         // If still not an array, check if it's a single item object
         if (!Array.isArray(items) && items && typeof items === 'object' && (items.name || items.description)) {
             items = [items];
         } else if (!Array.isArray(items)) {
             // Fallback to empty array if extraction failed totally
-            items = []; 
+            items = [];
         }
     }
 
-    return { 
-        items: items, 
-        interaction: { 
+    return {
+        items: items,
+        interaction: {
             promptSummary: 'Extract items from files/text',
-            fullPrompt: 'Deep Item Extraction', 
-            response: response.text, 
-            feature: 'item_extraction', 
-            model: 'gemini-2.5-pro' 
-        } 
+            fullPrompt: 'Deep Item Extraction',
+            response: response.text,
+            feature: 'item_extraction',
+            model: 'gemini-1.5-pro'
+        }
     };
 };
 
@@ -518,14 +558,14 @@ export const analyzeProcurementDocument = async (file: File, type: string, poCon
     const prompt = `Analyze this ${type}. ${poContext ? `Compare against PO Context: ${JSON.stringify(poContext)}` : ''}`;
 
     const response = await safeGenerateContent({
-        model: "gemini-2.5-pro",
+        model: "gemini-1.5-pro",
         contents: {
             parts: [
                 { inlineData: { mimeType: file.type, data: base64 } },
                 { text: prompt }
             ]
         },
-        config: { 
+        config: {
             responseMimeType: "application/json",
             systemInstruction: systemInstruction,
             thinkingConfig: { thinkingBudget: 4096 }
@@ -538,7 +578,7 @@ export const analyzeProcurementDocument = async (file: File, type: string, poCon
 export const getServiceSuggestions = async (event: EventItem) => {
     const prompt = `Suggest 5 creative services or items to add to the event "${event.name}" (${event.eventType}). Return JSON array of objects with 'service' and 'description'.`;
     const response = await safeGenerateContent({
-        model: "gemini-2.5-pro",
+        model: "gemini-1.5-pro",
         contents: prompt,
         config: { responseMimeType: "application/json" }
     });
@@ -546,12 +586,13 @@ export const getServiceSuggestions = async (event: EventItem) => {
 };
 
 export const generateVideoPreview = async (prompt: string): Promise<string> => {
+    const ai = getAI();
     let operation = await ai.models.generateVideos({
         model: 'veo-3.1-fast-generate-preview',
         prompt: prompt,
         config: { numberOfVideos: 1, resolution: '1080p', aspectRatio: '16:9' }
     });
-    
+
     while (!operation.done) {
         await new Promise(resolve => setTimeout(resolve, 5000));
         operation = await ai.operations.getVideosOperation({ operation: operation });
@@ -560,7 +601,7 @@ export const generateVideoPreview = async (prompt: string): Promise<string> => {
     const videoUri = operation.response?.generatedVideos?.[0]?.video?.uri;
     if (!videoUri) throw new Error("Failed to generate video.");
 
-    return `${videoUri}&key=${process.env.API_KEY}`;
+    return `${videoUri}&key=${getApiKey()}`;
 };
 
 export const autofillClientDetails = async (companyName: string, website?: string) => {
@@ -568,7 +609,7 @@ export const autofillClientDetails = async (companyName: string, website?: strin
     Return JSON: { primaryContactName: string, email: string, phone: string, address: string, internalNotes: string (summary) }.
     Use dummy data if not real.`;
     const response = await safeGenerateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-1.5-flash",
         contents: prompt,
         config: { responseMimeType: "application/json" }
     });
@@ -576,10 +617,10 @@ export const autofillClientDetails = async (companyName: string, website?: strin
 };
 
 export const checkForDuplicateClient = async (newClient: Partial<Client>, existingClients: Client[]) => {
-    const prompt = `Check if "${newClient.companyName}" matches any of these clients (fuzzy match): ${JSON.stringify(existingClients.map(c => ({id: c.id, name: c.companyName, email: c.email})))}. 
+    const prompt = `Check if "${newClient.companyName}" matches any of these clients (fuzzy match): ${JSON.stringify(existingClients.map(c => ({ id: c.id, name: c.companyName, email: c.email })))}. 
     Return JSON: { isDuplicate: boolean, matchId: string | null }.`;
     const response = await safeGenerateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-1.5-flash",
         contents: prompt,
         config: { responseMimeType: "application/json" }
     });
@@ -592,11 +633,11 @@ export const checkForDuplicateClient = async (newClient: Partial<Client>, existi
 
 export const curateServiceCollection = async (promptText: string, services: ServiceItem[]) => {
     const prompt = `Select best services from this list for: "${promptText}".
-    Services: ${JSON.stringify(services.map(s => ({id: s.id, name: s.name, category: s.category})))}.
+    Services: ${JSON.stringify(services.map(s => ({ id: s.id, name: s.name, category: s.category })))}.
     Return JSON array of service IDs only.`;
-    
+
     const response = await safeGenerateContent({
-        model: "gemini-2.5-pro",
+        model: "gemini-1.5-pro",
         contents: prompt,
         config: { responseMimeType: "application/json" }
     });
@@ -609,30 +650,30 @@ export const generateCatalogueConfig = async (serviceIds: string[], services: Se
     Return JSON: { title: string, intro: string }.`;
 
     const response = await safeGenerateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-1.5-flash",
         contents: prompt,
         config: { responseMimeType: "application/json" }
     });
     return { ...parseJSON(response.text || '{}'), fullPrompt: prompt };
 };
 
-export const getFinancialAnalysis = async (events: EventItem[], services: ServiceItem[], users: User[]) => {
+export const getFinancialAnalysis = async (events: EventItem[], _services: ServiceItem[], _users: User[]) => {
     const prompt = `Analyze the financial performance of these events. Highlight trends, profitable services, and salesperson performance.
     Events Summary: ${JSON.stringify(events.map(e => ({ name: e.name, revenue: e.cost_tracker.reduce((s, i) => s + i.client_price_sar * i.quantity, 0), status: e.status })))}.`;
-    
+
     const response = await safeGenerateContent({
-        model: "gemini-2.5-pro",
+        model: "gemini-1.5-pro",
         contents: prompt
     });
     return { result: response.text || '', fullPrompt: prompt };
 };
 
-export const getPricingSuggestion = async (service: ServiceItem, events: EventItem[]) => {
+export const getPricingSuggestion = async (service: ServiceItem, _events: EventItem[]) => {
     const prompt = `Suggest an optimal price for "${service.name}" based on its category "${service.category}" and base price ${service.basePrice}. 
     Consider it's used in high-end events. Return JSON: { suggestedPrice: number, suggestedMargin: number }.`;
-    
+
     const response = await safeGenerateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-1.5-flash",
         contents: prompt,
         config: { responseMimeType: "application/json" }
     });
